@@ -35,6 +35,7 @@ fps = int(cap.get(cv2.CAP_PROP_FPS))
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
+"""
 # Leer el primer frame para obtener coordenadas de interés
 ret, frame = cap.read()
 if not ret:
@@ -64,10 +65,16 @@ height, width = frame.shape[:2]
 # Define los puntos del trapecio
 vertices = np.array([[
     (90, height), # punto inferior izq
-    (480, 290), # punto superior izq
-    (496, 290), # punto superior derecho
-    (846, height) # punto inferior derecho
+    (440, 330), # punto superior izq
+    (535, 330), # punto superior derecho
+    (860, height) # punto inferior derecho
 ]], dtype=np.int32)
+# vertices = np.array([[
+    #     (99, height), # punto inferior izq
+    #     (480, 330), # 290 punto superior izq
+    #     (500, 330), # 290 punto superior derecho
+    #     (850, height) # punto inferior derecho
+    # ]], dtype=np.int32)
 
 # Crea una máscara negra del mismo tamaño que el frame
 mask = np.zeros((height, width), dtype=np.uint8)
@@ -86,7 +93,11 @@ masked_frame = cv2.bitwise_and(frame, mask_3ch)
 cv2.imshow('Frame', masked_frame)
 cv2.waitKey(0)
 cv2.destroyAllWindows()  # Cierra la ventana
+"""
 
+# Variables para almacenar los promedios móviles de las líneas
+left_fit_average = []
+right_fit_average = []
 
 
 # Procesar cada fotograma
@@ -100,9 +111,9 @@ while cap.isOpened():
     # Define los puntos del trapecio
     vertices = np.array([[
         (90, height), # punto inferior izq
-        (480, 290), # punto superior izq
-        (496, 290), # punto superior derecho
-        (846, height) # punto inferior derecho
+        (440, 330), # punto superior izq
+        (535, 330), # punto superior derecho
+        (860, height) # punto inferior derecho
     ]], dtype=np.int32)
     
     # Crea una máscara negra del mismo tamaño que el frame
@@ -121,33 +132,68 @@ while cap.isOpened():
     _, img_b = cv2.threshold(img_gris, 130, 255, cv2.THRESH_BINARY)
 
     # Detección de bordes con Canny
-    edges = cv2.Canny(img_b, 0.2*255, 0.60*255)
+    edges = cv2.Canny(img_b, 0.2*255, 0.50*255)
 
     # Gradiente morfológico
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
     f_mg = cv2.morphologyEx(edges, cv2.MORPH_GRADIENT, kernel)
 
-    # Detectar puntos
-    w = -1 * np.ones((3, 3))                   
-    w[1, 1] = 8                             
-    fp = cv2.filter2D(f_mg, cv2.CV_64F, w)
-    fpn = abs(fp)
-    fpn = np.uint8(fpn)
+    # Transformada de Hough probabilística para detectar líneas rectas
+    Rres = 1 # rho: resolución de la distancia en píxeles
+    Thetares = np.pi/180 # theta: resolución del ángulo en radianes
+    Threshold = 50 # threshold: número mínimo de intersecciones para detectar una línea
+    minLineLength = 100 # minLineLength: longitud mínima de la línea. Líneas más cortas que esto se descartan.
+    maxLineGap = 110 # maxLineGap: brecha máxima entre segmentos para tratarlos como una sola línea
 
-    # Crear una imagen en color vacía del mismo tamaño que frame
-    fpn_colored = np.zeros_like(frame)
+    # Aplicamos la transformada de Hough probabilística
+    lines = cv2.HoughLinesP(f_mg, Rres, Thetares, Threshold, minLineLength, maxLineGap)
+        
+    # Creamos una imagen en blanco para dibujar las líneas
+    line_image = np.zeros_like(frame)
 
-    # Crear una máscara de las líneas detectadas
-    mask = fpn.astype(np.uint8)
+    # Variables para almacenar las líneas del lado izquierdo y derecho
+    left_lines = []
+    right_lines = []
 
-    # Aplicar el color azul a las líneas detectadas
-    fpn_colored[mask > 0] = [255, 0, 0]  # Azul
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        # Determinar si la línea está en el lado izquierdo o derecho
+        if x1 < width / 2 and x2 < width / 2:
+            left_lines.append((x1, y1, x2, y2))
+        else:
+            right_lines.append((x1, y1, x2, y2))
 
-    # Superponer las líneas azules sobre la imagen original
-    overlay = cv2.addWeighted(frame, 1, fpn_colored, 1, 0)
+    # Promediamos las líneas del lado derecho para obtener una sola línea
+    if right_lines:
+        right_lines = np.array(right_lines)
+        x_coords = np.append(right_lines[:, 0], right_lines[:, 2])
+        y_coords = np.append(right_lines[:, 1], right_lines[:, 3])
+        poly_right = np.polyfit(y_coords, x_coords, 1)
+        right_fit_average.append(poly_right)
+        if len(right_fit_average) > 5:  # Usar un promedio móvil de 5 frames
+            right_fit_average.pop(0)
 
-    # Escribir el fotograma procesado en el video de salida
-    out.write(overlay)
+    if right_fit_average:
+        poly_right = np.mean(right_fit_average, axis=0)
+        y1_right, y2_right = height, int(height * 0.6)
+        x1_right = int(np.polyval(poly_right, y1_right))
+        x2_right = int(np.polyval(poly_right, y2_right))
+        cv2.line(line_image, (x1_right, y1_right), (x2_right, y2_right), (255, 0, 0), 10)  # Azul y más ancho
+    
+    if left_lines:
+        left_lines = np.array(left_lines)
+        x_coords = np.append(left_lines[:, 0], left_lines[:, 2])
+        y_coords = np.append(left_lines[:, 1], left_lines[:, 3])
+        poly_left = np.polyfit(y_coords, x_coords, 1)
+        y1_left, y2_left = height, int(height * 0.6)
+        x1_left = int(np.polyval(poly_left, y1_left))
+        x2_left = int(np.polyval(poly_left, y2_left))
+        cv2.line(line_image, (x1_left, y1_left), (x2_left, y2_left), (255, 0, 0), 10)
+    # Superponemos las líneas sobre la imagen original
+    combined_image = cv2.addWeighted(frame, 0.8, line_image, 1, 0)
+
+    # Escribimos el fotograma procesado en el video de salida
+    out.write(combined_image)
 
 # Liberar los objetos y cerrar los archivos de video
 cap.release()
